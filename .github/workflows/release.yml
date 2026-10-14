@@ -1,0 +1,59 @@
+name: Windows release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Select release tag
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          $version = node -p "require('./package.json').version"
+          $tag = "v$version"
+          if ($env:REF_TYPE -eq "tag" -and $env:REF_NAME -ne $tag) { throw "Tag must match package.json version" }
+          "RELEASE_TAG=$tag" >> $env:GITHUB_ENV
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Verify types
+        run: npm run check
+      - name: Run tests
+        run: npm test
+      - name: Build application
+        run: npm run build
+      - name: Prepare portable Windows folder
+        run: node scripts/package-windows.mjs prepare
+      - name: Test the actual Windows bundle and restart persistence
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          node scripts/test-portable.mjs "artifacts/Promptfolio-v$version-windows-x64"
+      - name: Create ZIP and checksum without local test data
+        run: node scripts/package-windows.mjs archive
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = node -p "require('./package.json').version"
+          $archive = "artifacts/Promptfolio-v$version-windows-x64.zip"
+          gh release create $env:RELEASE_TAG $archive artifacts/SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Promptfolio $env:RELEASE_TAG — Windows x64" --notes-file docs/release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw "Release publication failed" }
